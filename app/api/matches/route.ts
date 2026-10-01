@@ -5,7 +5,7 @@ export const runtime="nodejs";
 type Player={sid:string;name:string};type Color="r"|"b";
 type Match={id:string;red:Player;black:Player;fen:string;turn:Color;turnDeadline:number;status:"active"|"finished";winner:Color|null;reason:"checkmate"|"timeout"|"resign"|"draw"|null;lastMove:{from:string;to:string;iccs:string}|null;createdAt:number;finishedAt?:number};
 const Q="wme-game:match-queue",QL="wme-game:queue-lock",RK="wme-game:rankings",TTL=3600,QTTL=600,TURN=30000;
-function redis(){return process.env.KV_REST_API_URL&&process.env.KV_REST_API_TOKEN?Redis.fromEnv():null}
+function redis(){return process.env.REDIS_URL?new Redis(process.env.REDIS_URL):null}
 async function lock(r:Redis,k:string,t=5){for(let i=0;i<8;i++){if(await r.set(k,"1",{nx:true,ex:t})==="OK")return true;await new Promise(x=>setTimeout(x,60))}return false}
 async function unlock(r:Redis,k:string){try{await r.del(k)}catch{}}
 async function ranking(r:Redis,w:string|null,l:string|null,d:string[]=[]){const k="wme-game:ranking-lock";if(!await lock(r,k))return;try{const a=(await r.get<any[]>(RK))||[],m=new Map(a.map(x=>[x.name,x])),g=(s:string)=>{const n=s.trim()||"遊民";if(!m.has(n))m.set(n,{name:n,wins:0,losses:0,draws:0,games:0,score:0});return m.get(n)};if(w&&l){const x=g(w),y=g(l);x.wins++;x.games++;x.score+=3;y.losses++;y.games++}else d.forEach(n=>{const x=g(n);x.draws++;x.games++;x.score++});await r.set(RK,[...m.values()].sort((x,y)=>y.score-x.score||y.wins-x.wins||x.name.localeCompare(y.name)))}finally{await unlock(r,k)}}
