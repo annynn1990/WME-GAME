@@ -1,5 +1,5 @@
 import { Chess } from "@weshell/xiangqi.js";
-import { Redis } from "@upstash/redis";
+import Redis from "ioredis";
 import { NextResponse } from "next/server";
 export const runtime="nodejs";
 type Player={sid:string;name:string};type Color="r"|"b";
