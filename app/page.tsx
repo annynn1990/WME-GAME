@@ -92,6 +92,13 @@ export default function Home() {
     }
   }
 
+  async function readJson(response: Response) {
+    const text = await response.text();
+    if (!text.trim()) throw new Error("伺服器目前沒有回傳資料");
+    try { return JSON.parse(text); }
+    catch { throw new Error("伺服器回傳格式錯誤"); }
+  }
+
   async function api(body: Record<string,unknown>) {
     const response = await fetch("/api/matches", {
       method:"POST",
@@ -99,7 +106,7 @@ export default function Home() {
       body:JSON.stringify(body),
       cache:"no-store"
     });
-    const data = await response.json();
+    const data = await readJson(response);
     if (!response.ok) throw new Error(data.error || "服務暫時忙碌");
     return data as MatchState;
   }
@@ -121,7 +128,7 @@ export default function Home() {
     const timer = window.setInterval(async () => {
       try {
         const response = await fetch("/api/matches?sessionId=" + encodeURIComponent(sessionId), {cache:"no-store"});
-        if (response.ok) sync(await response.json());
+        if (response.ok) sync(await readJson(response));
       } catch {}
     }, 900);
     return () => window.clearInterval(timer);
@@ -142,7 +149,7 @@ export default function Home() {
     async function loadRanking() {
       try {
         const response = await fetch("/api/rankings", {cache:"no-store"});
-        if (response.ok) setRankings(await response.json());
+        if (response.ok) setRankings(await readJson(response));
       } catch {}
     }
     loadRanking();
