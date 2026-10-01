@@ -12,7 +12,8 @@
     "next": "^15.5.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "@weshell/xiangqi.js": "^1.0.3"
+    "@weshell/xiangqi.js": "^1.0.3",
+    "ioredis": "^5.4.1"
   },
   "devDependencies": {
     "typescript": "^5.8.2",
