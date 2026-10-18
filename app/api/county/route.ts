@@ -16,7 +16,7 @@ type TrendKey = "surge" | "rising" | "steady" | "falling" | "quiet" | "offline";
 type ForumTrend = { key: TrendKey; label: string; description: string; freshness: number; postsPerDay: number | null; change24h: number | null; change6h: number | null; previous6h: number | null };
 
 const STATE_PATH = "yanxing-county/state.json";
-const HISTORY_PATH = "yanxing-county/forum-history.json";
+const HISTORY_PATH = "yanxing-county/forum-history/";
 const FORUM_URL = "https://www.wongmingempire.com/bbswm/forum.php?gid=366";
 const FALLBACK_FORUMS: ForumStat[] = [
   { id: "square", name: "延興廣場", topics: 10174, posts: 140445, lastPostAt: "2026-10-13T15:35:00+08:00" },
@@ -234,16 +234,53 @@ async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean; chec
   }
 }
 
+const HISTORY_INTERVAL = 10 * 60_000;
+const HISTORY_RETENTION = 7 * 24 * 60 * 60_000;
+const HISTORY_SLOT_MAX = 999999999;
 let historyCache: { at: number; history: ForumHistory } | null = null;
+
+function historyPath(slot: number, rows: ForumStat[]) {
+  // Inverted fixed-width timestamp makes newest snapshots sort first in Blob's pathname listing.
+  const reversed = HISTORY_SLOT_MAX - slot;
+  const fields = [String(reversed), String(totalPosts(rows))];
+  for (const row of rows) {
+    const last = row.lastPostAt ? Math.floor(new Date(row.lastPostAt).getTime() / 1000) : 0;
+    fields.push(String(row.topics ?? -1), String(row.posts ?? -1), String(Number.isFinite(last) ? last : 0));
+  }
+  return HISTORY_PATH + fields.join("_") + ".json";
+}
+
+function parseHistoryBlob(pathname: string): ForumSample | null {
+  const filename = pathname.slice(pathname.lastIndexOf("/") + 1).replace(/\.json$/, "");
+  const fields = filename.split("_").map(Number);
+  if (fields.length !== 14 || fields.some((value) => !Number.isFinite(value))) return null;
+  const slot = HISTORY_SLOT_MAX - fields[0];
+  if (!Number.isFinite(slot) || slot < 0) return null;
+  const rows = FALLBACK_FORUMS.map((base, index) => {
+    const offset = 2 + index * 3;
+    const topicCount = fields[offset];
+    const postCount = fields[offset + 1];
+    const lastSeconds = fields[offset + 2];
+    return {
+      ...base,
+      topics: topicCount < 0 ? null : topicCount,
+      posts: postCount < 0 ? null : postCount,
+      lastPostAt: lastSeconds > 0 ? new Date(lastSeconds * 1000).toISOString() : null
+    };
+  });
+  return { at: slot * HISTORY_INTERVAL, totalPosts: fields[1], rows };
+}
+
 async function readForumHistory(): Promise<ForumHistory> {
   if (historyCache && Date.now() - historyCache.at < 45_000) return historyCache.history;
   try {
-    const data = await readJsonBlob<ForumHistory>(HISTORY_PATH);
-    const history: ForumHistory = {
-      samples: Array.isArray(data?.samples)
-        ? data.samples.filter((item) => Number.isFinite(item.at) && Number.isFinite(item.totalPosts) && Array.isArray(item.rows)).slice(-400)
-        : []
-    };
+    const result = await list({ prefix: HISTORY_PATH, limit: 1000 });
+    const samples = result.blobs
+      .map((blob) => parseHistoryBlob(blob.pathname))
+      .filter((sample): sample is ForumSample => Boolean(sample))
+      .filter((sample) => Date.now() - sample.at <= HISTORY_RETENTION)
+      .sort((a, b) => a.at - b.at);
+    const history = { samples };
     historyCache = { at: Date.now(), history };
     return history;
   } catch {
@@ -258,17 +295,17 @@ function totalPosts(rows: ForumStat[]) {
 async function recordForumSample(rows: ForumStat[]): Promise<ForumHistory> {
   const history = await readForumHistory();
   const now = Date.now();
-  const samples = history.samples;
-  const latest = samples.length ? samples[samples.length - 1] : null;
-  if (latest && now - latest.at < 5 * 60_000) return history;
-  const sample: ForumSample = { at: now, totalPosts: totalPosts(rows), rows: rows.map((row) => ({ ...row })) };
-  const next: ForumHistory = {
-    samples: [...samples, sample].filter((item) => now - item.at <= 8 * 24 * 60 * 60_000).slice(-400)
-  };
+  const slot = Math.floor(now / HISTORY_INTERVAL);
+  const latest = history.samples.length ? history.samples[history.samples.length - 1] : null;
+  if (latest && Math.floor(latest.at / HISTORY_INTERVAL) >= slot) return history;
+  if (latest && now - latest.at < HISTORY_INTERVAL) return history;
+  const path = historyPath(slot, rows);
   try {
-    await put(HISTORY_PATH, JSON.stringify(next), {
+    await put(path, "{}", {
       access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/json"
     });
+    const sample: ForumSample = { at: slot * HISTORY_INTERVAL, totalPosts: totalPosts(rows), rows: rows.map((row) => ({ ...row })) };
+    const next = { samples: [...history.samples, sample].filter((item) => now - item.at <= HISTORY_RETENTION).slice(-1000) };
     historyCache = { at: now, history: next };
     return next;
   } catch {
