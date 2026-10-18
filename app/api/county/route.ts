@@ -13,7 +13,7 @@ type CountyState = { day: number; treasury: number; popularity: number; security
 
 const STATE_PATH = "yanxing-county/state.json";
 const FORUM_URL = "https://www.wongmingempire.com/bbswm/forum.php?gid=366";
-// Public-forum snapshot observed during research on 2026-10-19. It is clearly marked offline unless a live read succeeds.
+// Public page snapshot from a search cache crawled around 2026-10-14. It is marked offline unless a live read succeeds.
 const initialForums: ForumStat[] = [
   { id: "square", name: "延興廣場", topics: 10174, posts: 140445 },
   { id: "garden", name: "暢揮園", topics: 465, posts: 3706 },
@@ -203,7 +203,7 @@ function publicState(state: CountyState, stats: ForumStat[], online: boolean) {
   const totalTopics = stats.reduce((sum, row) => sum + (row.topics || 0), 0);
   return {
     state,
-    forum: { rows: stats, totalPosts, totalTopics, online },
+    forum: { rows: stats, totalPosts, totalTopics, online, sourceNote: online ? "即時論壇頁面" : "公開頁面快照（約 2026-10-14，非即時）" },
     activity: activityScore(stats, state),
     event: eventForDay(state.day),
     updatedAt: new Date().toISOString()
