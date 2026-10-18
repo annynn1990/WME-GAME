@@ -1,13 +1,15 @@
 /*
  * 黃名帝國論壇 → WME-GAME 會員名稱橋接
- * 把這段放在論壇頁面可執行的 JS 區域。
- * 不讀取密碼、不傳送 Cookie，只傳目前已登入會員的公開帳號名稱。
- *
- * 由於論壇實際會員 DOM 可能隨 DZ 模板而異，
- * 先支援常見 Discuz! 變數，再支援 data-username。
+ * 僅傳送公開帳號名稱，不讀取密碼、Cookie 或 Session Token。
  */
 (function () {
   "use strict";
+  var allowedOrigins = [
+    "https://wme-game.vercel.app",
+    "https://yanxing-county-game.vercel.app",
+    "https://yanxing-county-game-annynn1990s-projects.vercel.app",
+    "https://yanxing-county-game-git-main-annynn1990s-projects.vercel.app"
+  ];
 
   function getMemberName() {
     try {
@@ -15,12 +17,7 @@
       if (typeof _G !== "undefined" && _G && _G.username) return _G.username;
       var el = document.querySelector("[data-username]");
       if (el && el.dataset.username) return el.dataset.username;
-      var selectors = [
-        "#um .vwmy",
-        "#um .xi2",
-        ".hm .vwmy",
-        ".logininfo .xi2"
-      ];
+      var selectors = ["#um .vwmy", "#um .xi2", ".hm .vwmy", ".logininfo .xi2"];
       for (var i = 0; i < selectors.length; i++) {
         var node = document.querySelector(selectors[i]);
         if (node && node.textContent.trim()) return node.textContent.trim();
@@ -30,13 +27,18 @@
   }
 
   function send() {
-    var name = getMemberName();
-    var iframe = document.querySelector('iframe[data-wme-game], iframe[src*="wme-game.vercel.app"]');
-    if (!iframe || !iframe.contentWindow) return;
-    iframe.contentWindow.postMessage(
-      { type: "WME_MEMBER", username: name || "遊民" },
-      "https://wme-game.vercel.app"
+    var name = getMemberName() || "遊民";
+    var frames = document.querySelectorAll(
+      'iframe[data-wme-game], iframe[data-wme-county], iframe[src*="wme-game.vercel.app"], iframe[src*="yanxing-county-game"]'
     );
+    Array.prototype.forEach.call(frames, function (iframe) {
+      if (!iframe.contentWindow || !iframe.src) return;
+      try {
+        var origin = new URL(iframe.src, window.location.href).origin;
+        if (allowedOrigins.indexOf(origin) === -1) return;
+        iframe.contentWindow.postMessage({ type: "WME_MEMBER", username: name }, origin);
+      } catch (_) {}
+    });
   }
 
   window.addEventListener("load", function () {
