@@ -4,21 +4,25 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type ForumStat = { id: string; name: string; topics: number | null; posts: number | null };
+type ForumStat = { id: string; name: string; topics: number | null; posts: number | null; lastPostAt: string | null; change24h?: number | null };
 type Delta = { treasury?: number; popularity?: number; security?: number; infrastructure?: number; trust?: number; activityBonus?: number };
 type Choice = { id: string; title: string; description: string; delta: Delta };
 type EventTemplate = { id: string; icon: string; title: string; description: string; choices: Choice[] };
 type JournalEntry = { day: number; eventTitle: string; choiceTitle: string; official: string; at: string; delta: Delta };
 type CountyState = { day: number; treasury: number; popularity: number; security: number; infrastructure: number; trust: number; activityBonus: number; decisions: number; journal: JournalEntry[]; lastForumStats?: ForumStat[] };
+type ForumSample = { at: number; totalPosts: number; rows: ForumStat[] };
+type ForumHistory = { samples: ForumSample[] };
+type TrendKey = "surge" | "rising" | "steady" | "falling" | "quiet" | "offline";
+type ForumTrend = { key: TrendKey; label: string; description: string; freshness: number; postsPerDay: number | null; change24h: number | null; change6h: number | null; previous6h: number | null };
 
 const STATE_PATH = "yanxing-county/state.json";
+const HISTORY_PATH = "yanxing-county/forum-history.json";
 const FORUM_URL = "https://www.wongmingempire.com/bbswm/forum.php?gid=366";
-// Public page snapshot from a search cache crawled around 2026-10-14. It is marked offline unless a live read succeeds.
-const initialForums: ForumStat[] = [
-  { id: "square", name: "延興廣場", topics: 10174, posts: 140445 },
-  { id: "garden", name: "暢揮園", topics: 465, posts: 3706 },
-  { id: "hall", name: "永享堂", topics: 225, posts: 1834 },
-  { id: "government", name: "延興郡政府", topics: 30, posts: 202 }
+const FALLBACK_FORUMS: ForumStat[] = [
+  { id: "square", name: "延興廣場", topics: 10174, posts: 140445, lastPostAt: "2026-10-13T15:35:00+08:00" },
+  { id: "garden", name: "暢揮園", topics: 465, posts: 3706, lastPostAt: "2026-10-13T15:32:00+08:00" },
+  { id: "hall", name: "永享堂", topics: 225, posts: 1834, lastPostAt: "2026-10-07T21:54:00+08:00" },
+  { id: "government", name: "延興郡政府", topics: 30, posts: 202, lastPostAt: "2026-04-13T18:51:00+08:00" }
 ];
 const eventPool: EventTemplate[] = [
   { id: "market", icon: "🏮", title: "市集人潮減少", description: "商戶反映最近人流不足，擔心生意持續下滑。郡長官需要決定如何振興市集。", choices: [
@@ -82,37 +86,41 @@ const eventPool: EventTemplate[] = [
     { id: "statusquo", title: "維持現有人手", description: "保留資金，但不會立即改善效率。", delta: { treasury: 3 } }
   ]}
 ];
-
 function initialState(): CountyState {
   return { day: 1, treasury: 120, popularity: 60, security: 62, infrastructure: 25, trust: 58, activityBonus: 0, decisions: 0, journal: [] };
 }
 
 function tokenReady() { return Boolean(process.env.BLOB_READ_WRITE_TOKEN); }
 
+async function readJsonBlob<T>(path: string): Promise<T | null> {
+  const result = await list({ prefix: path, limit: 10 });
+  const blob = result.blobs.find((item) => item.pathname === path);
+  if (!blob) return null;
+  const response = await fetch(blob.url, { cache: "no-store" });
+  if (!response.ok) return null;
+  return await response.json() as T;
+}
+
 async function readState(): Promise<CountyState> {
-  if (!tokenReady()) throw new Error("尚未連接雲端儲存，請在 Vercel 為此專案連接 Blob 儲存空間。");
-  const result = await list({ prefix: STATE_PATH, limit: 10 });
-  const match = result.blobs.find((blob) => blob.pathname === STATE_PATH);
-  if (!match) return initialState();
-  const response = await fetch(match.url, { cache: "no-store" });
-  if (!response.ok) throw new Error("讀取雲端郡務存檔失敗。");
-  const data = await response.json() as CountyState;
+  if (!tokenReady()) throw new Error("雲端存檔尚未設定，請檢查 Vercel Blob 連線。");
+  const data = await readJsonBlob<CountyState>(STATE_PATH);
+  if (!data) return initialState();
   return { ...initialState(), ...data, journal: Array.isArray(data.journal) ? data.journal : [] };
 }
 
 async function saveState(state: CountyState) {
   await put(STATE_PATH, JSON.stringify(state), {
-    access: "public",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    contentType: "application/json"
+    access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/json"
   });
 }
 
 function cleanText(html: string) {
-  return html.replace(/<script\b[\s\S]*?<\/script>/gi, " ").replace(/<style\b[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+  return html.replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, " ")
+    .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
     .replace(/\s+/g, " ").trim();
 }
 
@@ -121,100 +129,332 @@ function num(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-let forumCache: { at: number; rows: ForumStat[]; ok: boolean } | null = null;
+function escapeRegExp(value: string) {
+  return value.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+}
 
-async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean }> {
-  if (forumCache && Date.now() - forumCache.at < 90_000) return { rows: forumCache.rows, ok: forumCache.ok };
+function lastPostTimestamp(text: string): string | null {
+  const full = text.match(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})[ T]+(\d{1,2}):(\d{2})\b/);
+  if (full) {
+    const y = full[1], month = full[2].padStart(2, "0"), day = full[3].padStart(2, "0");
+    const hour = full[4].padStart(2, "0"), minute = full[5];
+    return y + "-" + month + "-" + day + "T" + hour + ":" + minute + ":00+08:00";
+  }
+  const short = text.match(/\b(\d{1,2})[-/.](\d{1,2})[ T]+(\d{1,2}):(\d{2})\b/);
+  if (!short) return null;
+  const month = short[1].padStart(2, "0"), day = short[2].padStart(2, "0");
+  const hour = short[3].padStart(2, "0"), minute = short[4];
+  const nowTaipei = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  return nowTaipei.getUTCFullYear() + "-" + month + "-" + day + "T" + hour + ":" + minute + ":00+08:00";
+}
+
+function containerAround(html: string, index: number): string {
+  const lower = html.toLowerCase();
+  const candidates = ["<tr", "<li"];
+  let bestStart = -1;
+  let bestEnd = -1;
+  for (const tag of candidates) {
+    const start = lower.lastIndexOf(tag, index);
+    const close = tag === "<tr" ? "</tr>" : "</li>";
+    const end = lower.indexOf(close, index);
+    if (start >= 0 && end >= index && end - start < 16000 && start > bestStart) {
+      bestStart = start; bestEnd = end + close.length;
+    }
+  }
+  if (bestStart >= 0 && bestEnd > bestStart) return html.slice(bestStart, bestEnd);
+  return html.slice(Math.max(0, index - 400), Math.min(html.length, index + 2600));
+}
+
+let forumCache: { at: number; rows: ForumStat[] } | null = null;
+async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean; checkedAt: string }> {
+  const now = Date.now();
+  if (forumCache && now - forumCache.at < 90_000) {
+    return { rows: forumCache.rows, ok: true, checkedAt: new Date(forumCache.at).toISOString() };
+  }
+
   try {
     const response = await fetch(FORUM_URL, {
       cache: "no-store",
-      headers: { "user-agent": "WongmingCountyGame/1.0 (+public forum activity stats)" },
-      signal: AbortSignal.timeout(7000)
+      headers: {
+        "user-agent": "Mozilla/5.0 (compatible; WongmingCountyGame/1.0)",
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "zh-TW,zh;q=0.9,en;q=0.7",
+        "referer": "https://www.wongmingempire.com/bbswm/"
+      },
+      signal: AbortSignal.timeout(9000)
     });
-    if (!response.ok) throw new Error("Forum returned " + response.status);
+    if (!response.ok) throw new Error("Forum HTTP " + response.status);
     const html = await response.text();
+    if (!html.includes("延興廣場") || html.length < 5000) throw new Error("Forum page did not contain expected board listings");
+
     const aliases: Record<string, string[]> = {
       square: ["延興廣場", "延兴广场"],
       garden: ["暢揮園", "畅挥园"],
       hall: ["永享堂"],
       government: ["延興郡政府", "延兴郡政府"]
     };
-    const hits: { id: string; at: number; alias: string }[] = [];
-    for (const row of initialForums) {
+    const rows: ForumStat[] = FALLBACK_FORUMS.map((row) => ({ ...row, lastPostAt: null, change24h: null }));
+    let parsedCount = 0;
+
+    for (const row of rows) {
+      let best: { topics: number | null; posts: number | null; lastPostAt: string | null } | null = null;
       for (const alias of aliases[row.id]) {
-        const re = new RegExp(alias, "g");
+        const matcher = new RegExp(escapeRegExp(alias), "g");
         let match: RegExpExecArray | null;
-        while ((match = re.exec(html)) !== null) {
-          const preceding = html.slice(Math.max(0, match.index - 700), match.index);
-          // Prefer the actual forum listing (anchor/link region), not document metadata or a mention in another forum.
-          if (/<a\b/i.test(preceding) && !/<\/a>[\s\S]{0,80}<a\b/i.test(preceding.slice(-180))) {
-            hits.push({ id: row.id, at: match.index, alias });
-            break;
+        while ((match = matcher.exec(html)) !== null) {
+          const chunk = containerAround(html, match.index);
+          const text = cleanText(chunk);
+          const topicMatch = text.match(/(?:主題|主题)\s*[:：]?\s*([\d][\d,]*)/i);
+          const postMatch = text.match(/(?:帖數|帖数|帖子|貼子)\s*[:：]?\s*([\d][\d,]*)/i);
+          if (topicMatch || postMatch) {
+            best = {
+              topics: topicMatch ? num(topicMatch[1]) : null,
+              posts: postMatch ? num(postMatch[1]) : null,
+              lastPostAt: lastPostTimestamp(text)
+            };
+            if (best.topics !== null && best.posts !== null) break;
           }
         }
+        if (best?.topics !== null && best?.posts !== null) break;
       }
-    }
-    const byId = new Map<string, {at:number; alias:string}>();
-    for (const hit of hits.sort((a,b)=>a.at-b.at)) if (!byId.has(hit.id)) byId.set(hit.id, hit);
-    const ordered = [...byId.entries()].sort((a,b)=>a[1].at-b[1].at);
-    const rows = initialForums.map((forum) => ({ ...forum }));
-    let parsedCount = 0;
-    for (let i = 0; i < ordered.length; i++) {
-      const [id, hit] = ordered[i];
-      const end = ordered[i + 1]?.[1].at ?? Math.min(html.length, hit.at + 3500);
-      const segment = cleanText(html.slice(hit.at, end));
-      const postsMatch = segment.match(/(?:帖數|帖数|帖子|貼子|文章|posts?)\s*[:：]?\s*([\d][\d,]*)/i);
-      const topicsMatch = segment.match(/(?:主題|主题|threads?)\s*[:：]?\s*([\d][\d,]*)/i);
-      const row = rows.find((item) => item.id === id);
-      if (row && (postsMatch || topicsMatch)) {
-        if (postsMatch) row.posts = num(postsMatch[1]);
-        if (topicsMatch) row.topics = num(topicsMatch[1]);
+      if (best && (best.topics !== null || best.posts !== null)) {
+        row.topics = best.topics ?? row.topics;
+        row.posts = best.posts ?? row.posts;
+        row.lastPostAt = best.lastPostAt;
         parsedCount++;
       }
     }
-    const ok = parsedCount >= 2;
-    const result = ok ? rows : (forumCache?.rows || initialForums);
-    forumCache = { at: Date.now(), rows: result, ok };
-    return { rows: result, ok };
+
+    if (parsedCount < 3) throw new Error("Only parsed " + parsedCount + "/4 forum categories");
+    forumCache = { at: now, rows };
+    return { rows, ok: true, checkedAt: new Date(now).toISOString() };
   } catch {
-    const result = forumCache?.rows || initialForums;
-    return { rows: result, ok: forumCache?.ok || false };
+    const rows = forumCache?.rows || FALLBACK_FORUMS;
+    return { rows: rows.map((row) => ({ ...row })), ok: false, checkedAt: new Date().toISOString() };
   }
 }
 
-function clamp(value: number, min = 0, max = 100) { return Math.max(min, Math.min(max, Math.round(value))); }
+let historyCache: { at: number; history: ForumHistory } | null = null;
+async function readForumHistory(): Promise<ForumHistory> {
+  if (historyCache && Date.now() - historyCache.at < 45_000) return historyCache.history;
+  try {
+    const data = await readJsonBlob<ForumHistory>(HISTORY_PATH);
+    const history: ForumHistory = {
+      samples: Array.isArray(data?.samples)
+        ? data.samples.filter((item) => Number.isFinite(item.at) && Number.isFinite(item.totalPosts) && Array.isArray(item.rows)).slice(-400)
+        : []
+    };
+    historyCache = { at: Date.now(), history };
+    return history;
+  } catch {
+    return historyCache?.history || { samples: [] };
+  }
+}
 
-function eventForDay(day: number): EventTemplate & { eventId: string; day: number } {
-  const now = new Date();
-  const dailySeed = now.getUTCFullYear() * 372 + now.getUTCMonth() * 31 + now.getUTCDate();
-  const index = Math.abs((day * 17 + dailySeed * 13 + Math.floor(day / 3) * 7) % eventPool.length);
-  const chosen = eventPool[index];
+function totalPosts(rows: ForumStat[]) {
+  return rows.reduce((sum, row) => sum + (row.posts || 0), 0);
+}
+
+async function recordForumSample(rows: ForumStat[]): Promise<ForumHistory> {
+  const history = await readForumHistory();
+  const now = Date.now();
+  const samples = history.samples;
+  const latest = samples.length ? samples[samples.length - 1] : null;
+  if (latest && now - latest.at < 5 * 60_000) return history;
+  const sample: ForumSample = { at: now, totalPosts: totalPosts(rows), rows: rows.map((row) => ({ ...row })) };
+  const next: ForumHistory = {
+    samples: [...samples, sample].filter((item) => now - item.at <= 8 * 24 * 60 * 60_000).slice(-400)
+  };
+  try {
+    await put(HISTORY_PATH, JSON.stringify(next), {
+      access: "public", addRandomSuffix: false, allowOverwrite: true, contentType: "application/json"
+    });
+    historyCache = { at: now, history: next };
+    return next;
+  } catch {
+    return history;
+  }
+}
+
+function clamp(value: number, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function bestSampleBefore(history: ForumHistory, now: number, targetHours: number, toleranceHours: number) {
+  const target = now - targetHours * 60 * 60_000;
+  let best: ForumSample | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const sample of history.samples) {
+    if (sample.at > target) continue;
+    const distance = (target - sample.at) / (60 * 60_000);
+    if (distance <= toleranceHours && distance < bestDistance) {
+      best = sample;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function calculateTrend(rows: ForumStat[], history: ForumHistory, online: boolean, now = Date.now()): ForumTrend {
+  const ages = rows.map((row) => row.lastPostAt ? Math.max(0, (now - new Date(row.lastPostAt).getTime()) / 3_600_000) : null);
+  const weights = [0.55, 0.20, 0.15, 0.10];
+  let freshness = 0, usedWeight = 0;
+  ages.forEach((age, index) => {
+    if (age === null || !Number.isFinite(age)) return;
+    freshness += Math.exp(-age / 36) * 100 * (weights[index] || 0.1);
+    usedWeight += weights[index] || 0.1;
+  });
+  freshness = usedWeight > 0 ? freshness / usedWeight : 0;
+
+  const currentTotal = totalPosts(rows);
+  const baseline24 = bestSampleBefore(history, now, 24, 7);
+  const baseline6 = bestSampleBefore(history, now, 6, 3);
+  const baseline12 = bestSampleBefore(history, now, 12, 3);
+  const change24h = baseline24 ? currentTotal - baseline24.totalPosts : null;
+  const change6h = baseline6 ? currentTotal - baseline6.totalPosts : null;
+  const previous6h = baseline6 && baseline12 ? baseline6.totalPosts - baseline12.totalPosts : null;
+  const observedHours = baseline24 ? (now - baseline24.at) / 3_600_000 : baseline6 ? (now - baseline6.at) / 3_600_000 : null;
+  const postsPerDay = change24h !== null && observedHours && observedHours >= 12
+    ? Math.max(0, change24h) / observedHours * 24
+    : change6h !== null && observedHours && observedHours >= 3
+      ? Math.max(0, change6h) / observedHours * 24
+      : null;
+
+  let key: TrendKey = "steady", label = "平穩觀察";
+  let description = "論壇互動大致平穩，持續觀察最新發帖和各分區動態。";
+  if (!online) {
+    key = "offline"; label = "論壇暫離線";
+    description = "暫時無法取得最新論壇資料，先顯示最近可用的公開數據；暫不根據舊數據判斷升跌。";
+  } else if (change6h !== null && previous6h !== null && previous6h >= 8 && change6h <= previous6h * 0.45) {
+    key = "falling"; label = "新帖正在減少";
+    description = "最近時段新增約 " + Math.max(0, change6h) + " 帖，較之前明顯放慢，郡府需要維持討論熱度。";
+  } else if (change6h !== null && change6h >= 20 && (previous6h === null || change6h >= previous6h * 1.6)) {
+    key = "surge"; label = "論壇突然升溫";
+    description = "觀測時段新增約 " + change6h + " 帖，討論明顯升溫；應把握時機或避免話題失控。";
+  } else if (change6h !== null && change6h >= 4) {
+    key = "rising"; label = "論壇人氣上升";
+    description = "觀測時段新增約 " + change6h + " 帖，郡內討論正逐步增加。";
+  } else {
+    const activeRecent = ages.filter((age) => age !== null && age <= 12).length;
+    const activeToday = ages.filter((age) => age !== null && age <= 24).length;
+    const noGrowthLongEnough = history.samples.length >= 2 &&
+      history.samples[history.samples.length - 1].at - history.samples[0].at >= 18 * 60 * 60_000 && change24h === 0;
+    if ((noGrowthLongEnough && activeRecent === 0) || (activeToday === 0 && ages.every((age) => age === null || age > 36))) {
+      key = "quiet"; label = "分區逐漸冷清";
+      description = "主要分區最近少有新帖，郡府需要主動帶動交流，否則活躍度會持續走低。";
+    } else if (freshness >= 55) {
+      key = "steady"; label = "互動維持活躍";
+      description = "分區仍有近期發帖，暫時以維持良好交流、照顧新帖為主。";
+    } else {
+      key = "steady"; label = "平穩觀察";
+      description = "尚未累積足夠的連續樣本判斷升跌，會繼續對照新帖數與最後發帖時間。";
+    }
+  }
+  return {
+    key, label, description, freshness: clamp(freshness),
+    postsPerDay: postsPerDay === null ? null : Math.round(postsPerDay * 10) / 10,
+    change24h, change6h, previous6h
+  };
+}
+
+function eventForDay(day: number, trend: ForumTrend): EventTemplate & { eventId: string; day: number } {
+  let chosen: EventTemplate;
+  if (trend.key === "surge") {
+    chosen = {
+      id: "forum-surge", icon: "📈", title: "論壇討論突然升溫",
+      description: "分區新帖明顯增加。郡長官可以把握熱度鼓勵更多交流，也要留意話題秩序與不同分區的參與機會。",
+      choices: [
+        { id: "surge-cross", title: "舉辦跨區交流活動", description: "把熱度帶到較少人參與的分區。", delta: { treasury: -12, popularity: 7, trust: 3, activityBonus: 5 } },
+        { id: "surge-support", title: "置頂新手交流帖", description: "讓新會員更容易加入討論。", delta: { treasury: -5, popularity: 5, trust: 6, activityBonus: 3 } },
+        { id: "surge-watch", title: "維持秩序、自然發展", description: "不額外花費，由官員留意討論秩序。", delta: { security: 3, trust: 2 } }
+      ]
+    };
+  } else if (trend.key === "falling" || trend.key === "quiet") {
+    chosen = {
+      id: trend.key === "quiet" ? "forum-quiet" : "forum-falling",
+      icon: "💬", title: trend.key === "quiet" ? "分區討論陷入沉寂" : "論壇新帖增幅放慢",
+      description: trend.key === "quiet"
+        ? "最新發帖時間顯示多個分區缺乏新話題。郡府需要採取行動，不能只靠累積帖子數維持表面活躍。"
+        : "新增帖數較之前時段減少。請挑選一項措施，讓居民重新願意開帖和回覆。",
+      choices: [
+        { id: "quiet-official", title: "官員帶頭發起話題", description: "低成本開放問答，帶動居民回覆。", delta: { treasury: -5, popularity: 5, trust: 4, activityBonus: 7 } },
+        { id: "quiet-event", title: "舉辦跨區接龍／徵文", description: "成本較高，但能鼓勵不同分區共同參與。", delta: { treasury: -14, popularity: 8, infrastructure: 1, activityBonus: 10 } },
+        { id: "quiet-wait", title: "觀察一個階段", description: "保留經費，但人氣可能再下降。", delta: { treasury: 2, popularity: -3, trust: -2 } }
+      ]
+    };
+  } else if (trend.key === "rising") {
+    chosen = {
+      id: "forum-rising", icon: "🗨️", title: "居民參與正在增加",
+      description: "新帖數已有增長。郡府可以支援新話題、引導交流，或讓居民自行延續討論。",
+      choices: [
+        { id: "rising-welcome", title: "推動新人報到與回覆", description: "協助新會員融入各分區。", delta: { treasury: -4, popularity: 4, trust: 5, activityBonus: 4 } },
+        { id: "rising-topic", title: "推出本週主題活動", description: "用活動把新帖增長延續下去。", delta: { treasury: -10, popularity: 6, activityBonus: 7 } },
+        { id: "rising-organic", title: "維持自由交流", description: "不增加支出，先觀察熱度是否持續。", delta: { trust: 2, activityBonus: 1 } }
+      ]
+    };
+  } else {
+    const candidates = eventPool.filter((event) => event.id !== "quiet" && event.id !== "festival");
+    const dayString = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const seed = Number(dayString) || 20261019;
+    chosen = candidates[Math.abs(day * 17 + seed * 13 + Math.floor(day / 3) * 7) % candidates.length];
+  }
   return { ...chosen, eventId: String(day) + "-" + chosen.id, day };
 }
 
-function activityScore(stats: ForumStat[], state: CountyState) {
-  const posts = stats.reduce((sum, row) => sum + (row.posts || 0), 0);
-  const postBase = 78 * (posts / (posts + 250));
-  return clamp(postBase + state.popularity * 0.12 + Math.min(10, state.activityBonus * 0.5));
+function activityScore(state: CountyState, trend: ForumTrend) {
+  const growthScore = trend.postsPerDay === null ? trend.freshness : 100 * trend.postsPerDay / (trend.postsPerDay + 35);
+  return clamp(trend.freshness * 0.62 + growthScore * 0.30 + state.popularity * 0.06 + Math.min(4, state.activityBonus * 0.2));
 }
 
-function publicState(state: CountyState, stats: ForumStat[], online: boolean) {
-  const totalPosts = stats.reduce((sum, row) => sum + (row.posts || 0), 0);
-  const totalTopics = stats.reduce((sum, row) => sum + (row.topics || 0), 0);
+function publicState(state: CountyState, stats: ForumStat[], online: boolean, history: ForumHistory, sourceNote: string) {
+  const now = Date.now();
+  const trend = calculateTrend(stats, history, online, now);
+  const baseline24 = bestSampleBefore(history, now, 24, 7);
+  const rows = stats.map((row) => {
+    const oldRow = baseline24?.rows.find((item) => item.id === row.id);
+    return { ...row, change24h: oldRow && row.posts !== null && oldRow.posts !== null ? row.posts - oldRow.posts : null };
+  });
   return {
     state,
-    forum: { rows: stats, totalPosts, totalTopics, online, sourceNote: online ? "即時論壇頁面" : "公開頁面快照（約 2026-10-14，非即時）" },
-    activity: activityScore(stats, state),
-    event: eventForDay(state.day),
-    updatedAt: new Date().toISOString()
+    forum: {
+      rows,
+      totalPosts: totalPosts(rows),
+      totalTopics: rows.reduce((sum, row) => sum + (row.topics || 0), 0),
+      online, sourceNote, trend
+    },
+    activity: activityScore(state, trend),
+    event: eventForDay(state.day, trend),
+    updatedAt: new Date(now).toISOString()
   };
+}
+
+async function latestGameData(state: CountyState) {
+  const forum = await fetchForumStats();
+  let history = await readForumHistory();
+  let rows: ForumStat[];
+  let sourceNote: string;
+  if (forum.ok) {
+    rows = forum.rows;
+    history = await recordForumSample(rows);
+    sourceNote = "即時論壇頁面";
+  } else if (history.samples.length) {
+    rows = history.samples[history.samples.length - 1].rows;
+    sourceNote = "上次成功同步的論壇數據（非即時）";
+  } else if (state.lastForumStats?.length) {
+    rows = state.lastForumStats;
+    sourceNote = "上次郡務存檔中的論壇數據（非即時）";
+  } else {
+    rows = FALLBACK_FORUMS;
+    sourceNote = "公開頁面快照（非即時）";
+  }
+  return publicState(state, rows, forum.ok, history, sourceNote);
 }
 
 export async function GET() {
   try {
-    const [state, forum] = await Promise.all([readState(), fetchForumStats()]);
-    const rows = forum.ok ? forum.rows : (state.lastForumStats || forum.rows);
-    return NextResponse.json(publicState(state, rows, forum.ok), { headers: { "Cache-Control": "no-store" } });
+    const state = await readState();
+    const data = await latestGameData(state);
+    return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "讀取郡務資料失敗。" }, { status: 503 });
   }
@@ -224,13 +464,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const state = await readState();
+    const current = await latestGameData(state);
     const official = String(body.official || "郡長官").slice(0, 40);
-    const event = eventForDay(state.day);
-    if (String(body.eventId || "") !== event.eventId) {
-      const forum = await fetchForumStats();
-      return NextResponse.json({ error: "這項事件已更新，請以最新事件再作決定。", latest: publicState(state, forum.rows, forum.ok) }, { status: 409 });
+    if (String(body.eventId || "") !== current.event.eventId) {
+      return NextResponse.json({ error: "論壇狀態已更新，請按最新事件重新決策。", latest: current }, { status: 409 });
     }
-    const choice = event.choices.find((item) => item.id === String(body.choiceId || ""));
+    const choice = current.event.choices.find((item) => item.id === String(body.choiceId || ""));
     if (!choice) return NextResponse.json({ error: "找不到這個處理方案。" }, { status: 400 });
 
     const d = choice.delta;
@@ -241,14 +480,15 @@ export async function POST(request: Request) {
     state.trust = clamp(state.trust + (d.trust || 0));
     state.activityBonus = clamp(state.activityBonus + (d.activityBonus || 0), 0, 20);
     state.decisions += 1;
-    state.journal = [{ day: state.day, eventTitle: event.title, choiceTitle: choice.title, official, at: new Date().toISOString(), delta: d }, ...state.journal].slice(0, 24);
+    state.journal = [{
+      day: state.day, eventTitle: current.event.title, choiceTitle: choice.title, official,
+      at: new Date().toISOString(), delta: d
+    }, ...state.journal].slice(0, 16);
     state.day += 1;
-
-    const forum = await fetchForumStats();
-    if (forum.ok) state.lastForumStats = forum.rows;
+    if (current.forum.online) state.lastForumStats = current.forum.rows;
     await saveState(state);
-    const rows = forum.ok ? forum.rows : (state.lastForumStats || forum.rows);
-    return NextResponse.json(publicState(state, rows, forum.ok), { headers: { "Cache-Control": "no-store" } });
+    const latest = await latestGameData(state);
+    return NextResponse.json(latest, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "無法保存決策，請稍後重試。" }, { status: 503 });
   }
