@@ -153,7 +153,12 @@ export default function YanxingCountyGame() {
         <section className="forum-module county-indicators">
           <div className="module-heading"><h2>郡政指標</h2><span>無實際發帖則逐日衰退</span></div>
           <div className="county-indicator-grid">
-            {([{ name: "民心", value: data.state.popularity, note: "每 24 小時無行動 −4" }, { name: "信任", value: data.state.trust, note: "每 24 小時無行動 −3" }, { name: "活動加成", value: data.state.activityBonus, note: "無行動逐日減少", max: 20 }, { name: "郡庫", value: data.state.treasury, note: "可用於後續郡務" }] as const).map((metric) =>
+            {(([
+              { name: "民心", value: data.state.popularity, note: "每 24 小時無行動 −4" },
+              { name: "信任", value: data.state.trust, note: "每 24 小時無行動 −3" },
+              { name: "活動加成", value: data.state.activityBonus, note: "無行動逐日減少", max: 20 },
+              { name: "郡庫", value: data.state.treasury, note: "可用於後續郡務" }
+            ]) as Array<{ name: string; value: number; note: string; max?: number }>).map((metric) =>
               <div className="county-indicator" key={metric.name}><div><b>{metric.name}</b><strong>{money(metric.value)}{metric.max ? <small>/{metric.max}</small> : ""}</strong></div>
                 {metric.max ? <div className="indicator-bar"><i style={{ width: progress(metric.value / metric.max * 100) + "%" }}/></div> : metric.value >= 0 ? <div className="indicator-bar"><i style={{ width: progress(metric.value / (metric.name === "郡庫" ? 300 : 100) * 100) + "%" }}/></div> : null}
                 <small>{metric.note}</small></div>
