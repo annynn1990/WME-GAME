@@ -13,11 +13,12 @@ type CountyState = { day: number; treasury: number; popularity: number; security
 
 const STATE_PATH = "yanxing-county/state.json";
 const FORUM_URL = "https://www.wongmingempire.com/bbswm/forum.php?gid=366";
+// Public-forum snapshot observed during research on 2026-10-19. It is clearly marked offline unless a live read succeeds.
 const initialForums: ForumStat[] = [
-  { id: "square", name: "延興廣場", topics: null, posts: null },
-  { id: "garden", name: "暢揮園", topics: null, posts: null },
-  { id: "hall", name: "永享堂", topics: null, posts: null },
-  { id: "government", name: "延興郡政府", topics: null, posts: null }
+  { id: "square", name: "延興廣場", topics: 10174, posts: 140445 },
+  { id: "garden", name: "暢揮園", topics: 465, posts: 3706 },
+  { id: "hall", name: "永享堂", topics: 225, posts: 1834 },
+  { id: "government", name: "延興郡政府", topics: 30, posts: 202 }
 ];
 const eventPool: EventTemplate[] = [
   { id: "market", icon: "🏮", title: "市集人潮減少", description: "商戶反映最近人流不足，擔心生意持續下滑。郡長官需要決定如何振興市集。", choices: [
@@ -132,34 +133,47 @@ async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean }> {
     });
     if (!response.ok) throw new Error("Forum returned " + response.status);
     const html = await response.text();
-    const rows = initialForums.map((forum) => ({ ...forum }));
-    const chunks = html.match(/<tr\b[\s\S]*?<\/tr>|<li\b[\s\S]*?<\/li>/gi) || [];
     const aliases: Record<string, string[]> = {
       square: ["延興廣場", "延兴广场"],
       garden: ["暢揮園", "畅挥园"],
       hall: ["永享堂"],
       government: ["延興郡政府", "延兴郡政府"]
     };
-    for (const chunk of chunks) {
-      const text = cleanText(chunk);
-      for (const row of rows) {
-        if (!(aliases[row.id] || [row.name]).some((alias) => text.includes(alias))) continue;
-        let topics: number | null = null;
-        let posts: number | null = null;
-        const pair = text.match(/([\d][\d,]*)\s*\/\s*([\d][\d,]*)/);
-        if (pair) { topics = num(pair[1]); posts = num(pair[2]); }
-        const postsMatch = text.match(/(?:帖子|貼子|文章|posts?)\s*[:：]?\s*([\d][\d,]*)/i);
-        const topicsMatch = text.match(/(?:主題|主题|threads?)\s*[:：]?\s*([\d][\d,]*)/i);
-        if (postsMatch) posts = num(postsMatch[1]);
-        if (topicsMatch) topics = num(topicsMatch[1]);
-        if (posts !== null || topics !== null) {
-          row.posts = posts;
-          row.topics = topics;
+    const hits: { id: string; at: number; alias: string }[] = [];
+    for (const row of initialForums) {
+      for (const alias of aliases[row.id]) {
+        const re = new RegExp(alias, "g");
+        let match: RegExpExecArray | null;
+        while ((match = re.exec(html)) !== null) {
+          const preceding = html.slice(Math.max(0, match.index - 700), match.index);
+          // Prefer the actual forum listing (anchor/link region), not document metadata or a mention in another forum.
+          if (/<a\b/i.test(preceding) && !/<\/a>[\s\S]{0,80}<a\b/i.test(preceding.slice(-180))) {
+            hits.push({ id: row.id, at: match.index, alias });
+            break;
+          }
         }
       }
     }
-    const ok = rows.some((row) => row.posts !== null || row.topics !== null);
-    const result = ok ? rows : initialForums;
+    const byId = new Map<string, {at:number; alias:string}>();
+    for (const hit of hits.sort((a,b)=>a.at-b.at)) if (!byId.has(hit.id)) byId.set(hit.id, hit);
+    const ordered = [...byId.entries()].sort((a,b)=>a[1].at-b[1].at);
+    const rows = initialForums.map((forum) => ({ ...forum }));
+    let parsedCount = 0;
+    for (let i = 0; i < ordered.length; i++) {
+      const [id, hit] = ordered[i];
+      const end = ordered[i + 1]?.[1].at ?? Math.min(html.length, hit.at + 3500);
+      const segment = cleanText(html.slice(hit.at, end));
+      const postsMatch = segment.match(/(?:帖數|帖数|帖子|貼子|文章|posts?)\s*[:：]?\s*([\d][\d,]*)/i);
+      const topicsMatch = segment.match(/(?:主題|主题|threads?)\s*[:：]?\s*([\d][\d,]*)/i);
+      const row = rows.find((item) => item.id === id);
+      if (row && (postsMatch || topicsMatch)) {
+        if (postsMatch) row.posts = num(postsMatch[1]);
+        if (topicsMatch) row.topics = num(topicsMatch[1]);
+        parsedCount++;
+      }
+    }
+    const ok = parsedCount >= 2;
+    const result = ok ? rows : (forumCache?.rows || initialForums);
     forumCache = { at: Date.now(), rows: result, ok };
     return { rows: result, ok };
   } catch {
