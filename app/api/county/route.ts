@@ -193,7 +193,10 @@ async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean; chec
       hall: ["永享堂"],
       government: ["延興郡政府", "延兴郡政府"]
     };
-    const rows: ForumStat[] = FALLBACK_FORUMS.map((row) => ({ ...row, lastPostAt: null, change24h: null }));
+    const allAliases = [...new Set(Object.values(aliases).flat())];
+    const rows: ForumStat[] = FALLBACK_FORUMS.map((row) => ({
+      ...row, topics: null, posts: null, lastPostAt: null, change24h: null
+    }));
     let parsedCount = 0;
 
     for (const row of rows) {
@@ -202,30 +205,38 @@ async function fetchForumStats(): Promise<{ rows: ForumStat[]; ok: boolean; chec
         const matcher = new RegExp(escapeRegExp(alias), "g");
         let match: RegExpExecArray | null;
         while ((match = matcher.exec(html)) !== null) {
-          const chunk = containerAround(html, match.index);
-          const text = cleanText(chunk);
+          // Slice from this board's own name to the next board name. Discuz often places two boards inside one <tr>,
+          // so parsing the whole table row can accidentally assign the previous board's totals.
+          const startAt = match.index + alias.length;
+          let endAt = Math.min(html.length, startAt + 6000);
+          for (const nextAlias of allAliases) {
+            const nextAt = html.indexOf(nextAlias, startAt);
+            if (nextAt >= 0 && nextAt < endAt) endAt = nextAt;
+          }
+          const text = cleanText(html.slice(match.index, endAt));
           const topicMatch = text.match(/(?:主題|主题)\s*[:：]?\s*([\d][\d,]*)/i);
-          const postMatch = text.match(/(?:帖數|帖数|帖子|貼子)\s*[:：]?\s*([\d][\d,]*)/i);
-          if (topicMatch || postMatch) {
+          const postMatch = text.match(/(?:帖數|帖数)\s*[:：]?\s*([\d][\d,]*)/i);
+          if (topicMatch && postMatch) {
             best = {
-              topics: topicMatch ? num(topicMatch[1]) : null,
-              posts: postMatch ? num(postMatch[1]) : null,
+              topics: num(topicMatch[1]),
+              posts: num(postMatch[1]),
               lastPostAt: lastPostTimestamp(text)
             };
-            if (best.topics !== null && best.posts !== null) break;
+            break;
           }
         }
         if (best?.topics !== null && best?.posts !== null) break;
       }
-      if (best && (best.topics !== null || best.posts !== null)) {
-        row.topics = best.topics ?? row.topics;
-        row.posts = best.posts ?? row.posts;
+      if (best && best.topics !== null && best.posts !== null) {
+        row.topics = best.topics;
+        row.posts = best.posts;
         row.lastPostAt = best.lastPostAt;
         parsedCount++;
       }
     }
 
-    if (parsedCount < 3) throw new Error("Only parsed " + parsedCount + "/4 forum categories");
+    // Only label the connection live when every managed board was parsed independently.
+    if (parsedCount !== 4) throw new Error("Only parsed " + parsedCount + "/4 forum categories"); 
     forumCache = { at: now, rows };
     return { rows, ok: true, checkedAt: new Date(now).toISOString() };
   } catch {
