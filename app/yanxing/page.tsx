@@ -1,30 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import "./county.css";
 
-type ForumStat = { id: string; name: string; topics: number | null; posts: number | null };
+type ForumStat = { id: string; name: string; topics: number | null; posts: number | null; lastPostAt: string | null; change24h?: number | null };
 type Delta = { treasury?: number; popularity?: number; security?: number; infrastructure?: number; trust?: number; activityBonus?: number };
 type Choice = { id: string; title: string; description: string; delta: Delta };
 type GameEvent = { id: string; eventId: string; day: number; icon: string; title: string; description: string; choices: Choice[] };
+type TrendKey = "surge" | "rising" | "steady" | "falling" | "quiet" | "offline";
+type ForumTrend = { key: TrendKey; label: string; description: string; freshness: number; postsPerDay: number | null; change24h: number | null; change6h: number | null; previous6h: number | null };
 type JournalEntry = { day: number; eventTitle: string; choiceTitle: string; official: string; at: string; delta: Delta };
 type CountyState = { day: number; treasury: number; popularity: number; security: number; infrastructure: number; trust: number; activityBonus: number; decisions: number; journal: JournalEntry[]; lastForumStats?: ForumStat[] };
-type GameData = { state: CountyState; forum: { rows: ForumStat[]; totalPosts: number; totalTopics: number; online: boolean; sourceNote?: string }; activity: number; event: GameEvent; updatedAt: string };
+type GameData = { state: CountyState; forum: { rows: ForumStat[]; totalPosts: number; totalTopics: number; online: boolean; sourceNote: string; trend: ForumTrend }; activity: number; event: GameEvent; updatedAt: string };
 
-const effectNames: Record<string, string> = {
-  treasury: "郡庫", popularity: "民心", security: "治安",
-  infrastructure: "建設", trust: "信任", activityBonus: "活躍"
+const effectNames: Record<string, string> = { treasury: "郡庫", popularity: "民心", security: "治安", infrastructure: "建設", trust: "信任", activityBonus: "活躍" };
+const money = (n: number | null | undefined) => n == null ? "—" : n.toLocaleString("zh-TW");
+const signed = (n: number | null | undefined) => n == null ? "等待累積" : (n > 0 ? "+" : "") + n.toLocaleString("zh-TW");
+const timeShort = (value: string | null) => {
+  if (!value) return "暫無時間";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "時間不明";
+  return date.toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 };
-
-const metricMeta = [
-  { key: "popularity", label: "民心", icon: "♥", tone: "pink" },
-  { key: "security", label: "治安", icon: "⚔", tone: "blue" },
-  { key: "infrastructure", label: "建設", icon: "⌂", tone: "green" },
-  { key: "trust", label: "信任", icon: "✦", tone: "gold" }
-] as const;
-
-function fmt(n: number | null) { return n === null ? "—" : n.toLocaleString("zh-TW"); }
-function signed(n: number | undefined) { if (!n) return "—"; return (n > 0 ? "+" : "") + n; }
 
 export default function YanxingCountyGame() {
   const [data, setData] = useState<GameData | null>(null);
@@ -33,7 +30,8 @@ export default function YanxingCountyGame() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
-  const [tab, setTab] = useState<"town" | "forums" | "records">("town");
+  const [showLog, setShowLog] = useState(false);
+  const [clock, setClock] = useState("");
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
@@ -64,7 +62,14 @@ export default function YanxingCountyGame() {
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(() => refresh(true), 30000);
+    const timer = window.setInterval(() => refresh(true), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const update = () => setClock(new Date().toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false }));
+    update();
+    const timer = window.setInterval(update, 30000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -86,8 +91,7 @@ export default function YanxingCountyGame() {
         throw new Error(result.error || "決策未能保存");
       }
       setData(result as GameData);
-      setToast("決策已記錄： " + choice.title);
-      setTab("town");
+      setToast("已執行：" + choice.title);
     } catch (e) {
       setError(e instanceof Error ? e.message : "決策未能保存");
     } finally {
@@ -95,98 +99,59 @@ export default function YanxingCountyGame() {
     }
   }
 
-  const resources = useMemo(() => {
-    if (!data) return [];
-    return [
-      { label: "郡庫", value: data.state.treasury, icon: "◈", unit: "枚", color: "coin" },
-      { label: "累計發帖", value: data.forum.totalPosts, icon: "✉", unit: "帖", color: "post" },
-      { label: "活躍度", value: data.activity, icon: "✦", unit: "分", color: "activity" }
-    ];
-  }, [data]);
+  const d = data;
+  if (loading && !d) return <main className="county-shell compact-shell"><div className="compact-loading">延興郡物語 <span>正在同步論壇……</span></div></main>;
+  if (!d) return <main className="county-shell compact-shell"><div className="compact-loading">無法開啟郡務存檔<p>{error}</p><button onClick={() => refresh()}>重試</button></div></main>;
 
-  if (loading && !data) return <main className="county-shell"><div className="loading-card"><div className="pixel-spinner">✿</div><h1>延興郡物語</h1><p>正在打開郡政府檔案……</p></div></main>;
+  const trend = d.forum.trend;
+  const trendClass = trend.key === "surge" || trend.key === "rising" ? "up" : trend.key === "falling" || trend.key === "quiet" ? "down" : trend.key === "offline" ? "offline" : "steady";
 
-  if (!data) return <main className="county-shell"><div className="loading-card"><div className="pixel-spinner">!</div><h1>延興郡物語</h1><p>{error || "尚未連接郡務存檔。"}</p><button className="pixel-button" onClick={() => refresh()}>重新連線</button><p className="tiny-note">遊戲進度需要 Vercel Blob 雲端儲存；不會使用瀏覽器 localStorage。</p></div></main>;
+  return <main className="county-shell compact-shell">
+    <header className="compact-header">
+      <div className="compact-brand"><span className="tiny-seal">延</span><div><h1>延興郡物語</h1><p>論壇活躍 × 郡務經營</p></div></div>
+      <div className="compact-header-right"><label htmlFor="official">當值</label><input id="official" value={official} maxLength={40} onChange={(e) => setOfficial(e.target.value)} /><span>第 {d.state.day} 日</span></div>
+    </header>
 
-  return (
-    <main className="county-shell">
-      <header className="county-header">
-        <div className="brand-lockup">
-          <div className="crest">延</div>
-          <div><div className="overline">WONGMING EMPIRE · YANXING</div><h1>延興郡物語</h1><p>郡長官的像素治理日誌</p></div>
-        </div>
-        <div className="official-box"><label htmlFor="official">本次當值官員</label><input id="official" value={official} maxLength={40} onChange={(e) => setOfficial(e.target.value)} /><span>郡務決策將以此名稱記錄</span></div>
-      </header>
+    <section className="live-strip">
+      <div className="live-title"><span className={d.forum.online ? "live-dot" : "live-dot off"}/><b>{d.forum.online ? "論壇連動中" : "論壇資料暫離線"}</b><small>{clock} 更新</small></div>
+      <span className={"trend-chip " + trendClass}>{trend.key === "surge" ? "↗" : trend.key === "rising" ? "↑" : trend.key === "falling" || trend.key === "quiet" ? "↓" : trend.key === "offline" ? "!" : "＝"} {trend.label}</span>
+      <p>{trend.description}</p>
+    </section>
 
-      <section className="season-banner">
-        <div className="season-copy"><span className="season-tag">郡政紀錄　第 {data.state.day} 日</span><h2>{data.state.popularity >= 75 ? "郡民同心，百業漸興！" : data.state.trust < 35 ? "郡府正努力重建信任……" : "今天的延興郡，也要好好經營。"}</h2><p>處理突發事件、鼓勵居民發帖，讓延興郡一天天熱鬧起來。</p></div>
-        <div className="weather-stamp"><span>{data.event.icon}</span><small>今日事件</small><b>{data.event.title}</b></div>
-        <div className="pixel-skyline" aria-hidden="true"><i className="cloud c1"/><i className="cloud c2"/><div className="sun"/><div className="building b1"><i/><i/><i/><i/></div><div className="building b2"><i/><i/><i/><i/><i/><i/></div><div className="building b3"><i/><i/><i/><i/></div><div className="tree">♣</div><div className="road"/></div>
+    <section className="compact-stats">
+      <div className="hero-stat"><small>論壇活躍度</small><strong>{d.activity}<em>/100</em></strong><div className="activity-track"><i style={{ width: d.activity + "%" }}/></div><span>{trend.postsPerDay == null ? "累積趨勢樣本中" : "推算 " + money(Math.round(trend.postsPerDay)) + " 帖／日"}</span></div>
+      <div className="mini-stat"><small>四區總帖數</small><strong>{money(d.forum.totalPosts)}</strong><span>總主題 {money(d.forum.totalTopics)}</span></div>
+      <div className="mini-stat"><small>近 24 小時新增</small><strong className={trend.change24h != null && trend.change24h > 0 ? "good-number" : ""}>{signed(trend.change24h)}</strong><span>有足夠歷史樣本後顯示</span></div>
+      <div className="mini-stat"><small>郡庫</small><strong>{money(d.state.treasury)}<em>枚</em></strong><span>已處理 {d.state.decisions} 件事件</span></div>
+    </section>
+
+    <section className="compact-columns">
+      <div className="compact-main">
+        <section className="compact-panel">
+          <div className="compact-section-head"><h2>分區現況</h2><a href="https://www.wongmingempire.com/bbswm/forum.php?gid=366" target="_blank" rel="noreferrer">開啟論壇 ↗</a></div>
+          <div className="district-list">{d.forum.rows.map((row, index) => {
+            const bars = row.posts != null && d.forum.totalPosts ? Math.max(3, Math.round(row.posts / d.forum.totalPosts * 100)) : 3;
+            return <div className="district-line" key={row.id}><span className={"district-index i" + index}>{["廣","園","堂","府"][index]}</span><div className="district-middle"><b>{row.name}</b><div className="district-bar"><i style={{ width: bars + "%" }}/></div><small>最後發帖 {timeShort(row.lastPostAt)}</small></div><div className="district-numbers"><b>{money(row.posts)}</b><small>{row.change24h == null ? "24h —" : "24h " + signed(row.change24h)}</small></div></div>;
+          })}</div>
+          <div className="compact-data-note">{d.forum.sourceNote} · 頁面每分鐘更新；趨勢由雲端歷史快照比對。</div>
+        </section>
+
+        <section className="compact-panel condition-panel">
+          <div className="compact-section-head"><h2>郡政指標</h2><span>選擇事件會改變數值</span></div>
+          <div className="condition-grid">{([{name:"民心",val:d.state.popularity},{name:"治安",val:d.state.security},{name:"建設",val:d.state.infrastructure},{name:"信任",val:d.state.trust}] as const).map((item) => <div className="condition-item" key={item.name}><div><b>{item.name}</b><strong>{item.val}</strong></div><div className="condition-track"><i style={{ width: item.val + "%" }}/></div></div>)}</div>
+        </section>
+      </div>
+
+      <section className="compact-panel decision-panel">
+        <div className="decision-heading"><span className="decision-icon">{d.event.icon}</span><div><small>郡長官待處理</small><h2>{d.event.title}</h2></div></div>
+        <p className="decision-description">{d.event.description}</p>
+        <div className="decision-options">{d.event.choices.map((choice, index) => <button className="decision-option" key={choice.id} disabled={busy} onClick={() => decide(choice)}><span className="option-n">{index + 1}</span><span className="option-main"><b>{choice.title}</b><small>{choice.description}</small><span className="option-effects">{Object.entries(choice.delta).filter(([, value]) => value).map(([key, value]) => <em className={(value || 0) > 0 ? "effect-plus" : "effect-minus"} key={key}>{effectNames[key]} {signed(value)}</em>)}</span></span><span className="option-go">›</span></button>)}</div>
+        <div className="decision-footer">{busy ? "雲端保存中……" : "決策會即時同步給所有玩家"}{toast && <span className="success-inline">{toast}</span>}</div>
       </section>
+    </section>
 
-      <section className="resource-row">
-        {resources.map((item) => <div className={"resource-card " + item.color} key={item.label}><span className="resource-icon">{item.icon}</span><div><small>{item.label}</small><strong>{fmt(item.value)}<em>{item.unit}</em></strong></div></div>)}
-        <div className="resource-card day-card"><span className="resource-icon">▣</span><div><small>已處理事件</small><strong>{fmt(data.state.decisions)}<em>件</em></strong></div></div>
-      </section>
-
-      <nav className="game-tabs" aria-label="遊戲面板">
-        <button className={tab === "town" ? "active" : ""} onClick={() => setTab("town")}>▦ 郡政中心</button>
-        <button className={tab === "forums" ? "active" : ""} onClick={() => setTab("forums")}>✉ 論壇分區</button>
-        <button className={tab === "records" ? "active" : ""} onClick={() => setTab("records")}>▤ 郡務日誌</button>
-        <span className={"sync-pill " + (data.forum.online ? "online" : "offline")}><i/> {data.forum.online ? "論壇數據已同步" : "論壇連線暫不可用"}</span>
-      </nav>
-
-      {error && <div className="notice error-notice"><b>!</b><span>{error}</span><button onClick={() => setError("")}>關閉</button></div>}
-      {toast && <div className="notice success-notice"><b>✓</b><span>{toast}</span><button onClick={() => setToast("")}>×</button></div>}
-
-      {tab === "town" && <section className="dashboard-grid">
-        <div className="main-column">
-          <div className="panel town-panel">
-            <div className="panel-heading"><div><span className="mini-label">YOUR DISTRICT</span><h2>延興郡街景</h2></div><span className="pixel-badge">第 {data.state.day} 日</span></div>
-            <div className="town-map">
-              <div className="map-sky"><span className="map-cloud cloud-a">☁</span><span className="map-cloud cloud-b">☁</span><span className="map-sun">✹</span></div>
-              <div className="map-trees trees-left">♣　♣<br/>♣　 ♣</div>
-              <div className="map-lawn lawn-top"/>
-              <div className="map-road road-horizontal"/><div className="map-road road-vertical"/>
-              <div className="plot hall-plot"><div className="pixel-building hall-building"><b>延</b><i/><i/><i/></div><small>郡政府</small></div>
-              <div className="plot forum-plot"><div className="pixel-building forum-building"><b>✉</b><i/><i/><i/><i/></div><small>論壇廣場</small></div>
-              <div className="plot garden-plot"><div className="pixel-building garden-building"><b>♣</b><i/><i/></div><small>暢揮園</small></div>
-              <div className="plot hall2-plot"><div className="pixel-building hall2-building"><b>永</b><i/><i/><i/></div><small>永享堂</small></div>
-              <div className="villager v1">●<i/></div><div className="villager v2">●<i/></div><div className="villager v3">●<i/></div>
-              <div className="map-caption">延興郡・行政區域示意圖</div>
-            </div>
-            <div className="map-legend"><span><i className="legend-blue"/>行政設施</span><span><i className="legend-green"/>綠化與公共空間</span><span><i className="legend-orange"/>居民活動區</span></div>
-          </div>
-
-          <div className="panel metrics-panel">
-            <div className="panel-heading"><div><span className="mini-label">DISTRICT CONDITION</span><h2>郡內狀況</h2></div><span className="subtle">每次決策都會影響數值</span></div>
-            <div className="metric-list">
-              {metricMeta.map((m) => {
-                const val = data.state[m.key];
-                const mood = val >= 70 ? "狀態良好" : val >= 40 ? "尚可維持" : "需要優先改善";
-                return <div className="metric-line" key={m.key}><div className={"metric-symbol " + m.tone}>{m.icon}</div><div className="metric-info"><div className="metric-name"><b>{m.label}</b><span>{mood}</span></div><div className="meter"><i className={m.tone} style={{ width: val + "%" }}/></div></div><strong className="metric-score">{val}<small>/100</small></strong></div>;
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="side-column">
-          <div className="panel event-panel">
-            <div className="event-top"><span className="event-icon">{data.event.icon}</span><div><span className="mini-label">URGENT MATTER</span><h2>郡府突發事件</h2></div></div>
-            <h3>{data.event.title}</h3><p className="event-description">{data.event.description}</p>
-            <div className="event-rule"><span>⚑</span><p>請選擇一項處理方案。不同方案會改變郡庫與郡民對政府的評價。</p></div>
-            <div className="choices">{data.event.choices.map((choice, index) => <button className="choice-card" key={choice.id} disabled={busy} onClick={() => decide(choice)}><span className="choice-number">{String(index + 1).padStart(2, "0")}</span><span className="choice-copy"><b>{choice.title}</b><small>{choice.description}</small><span className="choice-effects">{Object.entries(choice.delta).filter(([, value]) => value !== 0).map(([key, value]) => <em key={key} className={(value || 0) > 0 ? "plus" : "minus"}>{effectNames[key]} {signed(value)}</em>)}</span></span><span className="choice-arrow">›</span></button>)}</div>
-            <div className="event-foot">{busy ? <><span className="loading-dot"/>正在保存郡務決策…</> : "選擇後將立即更新共用郡務存檔"}</div>
-          </div>
-          <div className="panel officials-panel"><div className="panel-heading"><div><span className="mini-label">DISTRICT OFFICE</span><h2>官員分工</h2></div><span className="tiny-crest">延</span></div><div className="official-row"><span className="official-avatar blue">令</span><div><b>郡長官</b><small>統籌郡務・事件裁決</small></div><span className="role-current">主理</span></div><div className="official-row"><span className="official-avatar green">財</span><div><b>財政官</b><small>郡庫・預算與補助</small></div><span className="role-tag">財政</span></div><div className="official-row"><span className="official-avatar orange">治</span><div><b>治安官</b><small>巡查・居民安全</small></div><span className="role-tag">治安</span></div><div className="official-row"><span className="official-avatar purple">文</span><div><b>文教官</b><small>文化・論壇活動</small></div><span className="role-tag">文教</span></div><p className="officials-note">目前為角色分工面板；未指定真實官員名單，因此以職務代稱。</p></div>
-        </div>
-      </section>}
-
-      {tab === "forums" && <section className="panel forum-panel"><div className="panel-heading"><div><span className="mini-label">LIVE FORUM ACTIVITY</span><h2>四大分區・活躍概況</h2></div><div className={"sync-label " + (data.forum.online ? "on" : "off")}>{data.forum.online ? "● 已讀取論壇" : "● 暫用最近可用資料"}</div></div><p className="section-intro">帖數是郡活躍度的主要來源；發帖量愈高，活躍指數的基礎分愈高。郡務事件另可帶來少量活動加成。</p><div className="forum-cards">{data.forum.rows.map((forum, index) => <article className={"forum-card fc-" + index} key={forum.id}><div className="forum-card-top"><span>{["✉","♣","▤","⌂"][index]}</span><small>0{index + 1} / DISTRICT</small></div><h3>{forum.name}</h3><div className="forum-numbers"><div><small>發帖量</small><b>{fmt(forum.posts)}</b></div><div><small>主題數</small><b>{fmt(forum.topics)}</b></div></div><div className="forum-mini-meter"><i style={{ width: Math.min(100, ((forum.posts || 0) / Math.max(1, data.forum.totalPosts)) * 100) + "%" }}/></div><a href={"https://www.wongmingempire.com/bbswm/forum.php?gid=366"} target="_blank" rel="noreferrer">開啟論壇分區 ↗</a></article>)}</div><div className="activity-formula"><b>活躍度計算</b><span>分區累計帖子數（主要權重）＋ 郡民人氣 ＋ 郡務活動加成</span><strong>{data.activity}<small>/100</small></strong></div><p className="data-footnote">論壇網站若暫時拒絕讀取，會使用明確標記的公開頁面快照，而不會冒充即時數據。{data.forum.sourceNote ? "目前資料來源：" + data.forum.sourceNote + "。 " : ""}成功連線時約每 90 秒重新讀取。</p></section>}
-
-      {tab === "records" && <section className="panel records-panel"><div className="panel-heading"><div><span className="mini-label">COUNTY DIARY</span><h2>郡務決策日誌</h2></div><span className="pixel-badge">{data.state.journal.length} 筆紀錄</span></div>{data.state.journal.length === 0 ? <div className="empty-journal"><span>📜</span><h3>郡務簿仍是空白</h3><p>處理今日事件後，決策與影響就會記錄在這裡。</p></div> : <div className="journal-list">{data.state.journal.map((entry, i) => <article className="journal-entry" key={entry.at + "-" + i}><div className="journal-day">第<strong>{entry.day}</strong>日</div><div className="journal-body"><small>{new Date(entry.at).toLocaleString("zh-TW") } · {entry.official}</small><h3>{entry.eventTitle}</h3><p>決策：{entry.choiceTitle}</p><div className="journal-deltas">{Object.entries(entry.delta).filter(([, value]) => value !== 0).map(([key, value]) => <em key={key} className={(value || 0) > 0 ? "plus" : "minus"}>{effectNames[key]} {signed(value)}</em>)}</div></div><span className="journal-check">✓</span></article>)}</div>}</section>}
-
-      <footer className="county-footer"><div><span className="footer-crest">延</span><span><b>延興郡物語</b><small>黃名帝國・郡務模擬遊戲</small></span></div><span>雲端共享存檔 · 不使用 localStorage · v1.0</span><button onClick={() => refresh()} title="重新讀取雲端狀態">↻ 更新資料</button></footer>
-    </main>
-  );
+    {error && <div className="compact-error"><span>{error}</span><button onClick={() => setError("")}>×</button></div>}
+    <footer className="compact-footer"><span>延興郡政府・像素郡務模擬</span><button onClick={() => setShowLog(!showLog)}>{showLog ? "收起紀錄" : "郡務紀錄 (" + d.state.journal.length + ")"}</button><button onClick={() => refresh()}>↻ 同步</button></footer>
+    {showLog && <section className="compact-panel log-panel">{d.state.journal.length === 0 ? <p>目前沒有決策紀錄。</p> : d.state.journal.map((entry, i) => <div className="log-line" key={entry.at + i}><b>第 {entry.day} 日 · {entry.eventTitle}</b><span>{entry.choiceTitle}／{entry.official}／{timeShort(entry.at)}</span></div>)}</section>}
+  </main>;
 }
